@@ -471,7 +471,7 @@ const PAL = {
    Bu etiket ana menüde başlığın yanında görünür ve konsola yazılır.
    Amaç: tarayıcı önbelleği yüzünden eski dosyanın açılıp açılmadığını
    tek bakışta anlayabilmek. Her güncellemede artırılır. */
-const BUILD='b41';
+const BUILD='b42';
 try{ console.log('%cEvrenin Muhafızları — yapı '+BUILD,'color:#9d5fe0;font-weight:bold'); }catch(e){}
 
 /* ---------------- GRID ---------------- */
@@ -573,20 +573,6 @@ const STREET_NAMES = ['light_square','light_curved','fence-panel'];
 /* çit panelinin ham ölçüleri (GLB'den ölçüldü): uzunluk X=1.883, yükseklik 1.047,
    kalınlık Z=0.616. Bir karo (T=1.0) tam kaplasın diye 1/1.883 ile ölçeklenir. */
 const FENCE_LEN = 1.883;
-/* tek stil, tüm haritalarda — Kenney Modular Road Kit 2
-   ÖNEMLİ — straightDir 'Z' olmalı: road_straightBarrier'ın yükseltilmiş bariyerleri
-   modelde x=±0.475'te, Z boyunca uzanıyor (geometriden ölçüldü). Yani yolun aktığı
-   eksen Z. Eskiden 'X' yazıyordu; bu yüzden parça 90° yanlış dönüyor, bariyerler
-   yolu boydan boya kesiyor ve halka yolda her karo sınırında beyaz duvar çubukları
-   oluşuyordu. (Modelin içindeki 'line'/'asphaltEdge' katmanları asfaltın ALTINDA
-   kaldığı için görünmüyor — yön tayininde bariyerler esas alınmalı.)
-   yOff: road_straightBarrier modeli diğer parçalardan 0.03 birim aşağıda duruyor
-   (asfalt yüzeyi -0.020, diğerleri +0.010). Bu fark köşelerde basamak yapıyordu. */
-const KIT2_SET = { straight:'road_straightBarrier', straightDir:'Z', bend:'road_bend', bendDirs:['-X','+Z'],
-                    tee:'road_intersection', teeMissing:'-Z', cross:'road_crossroad',
-                    end:'road_end', endDir:'+X', y:-0.02,
-                    yOff:{ 'road_straightBarrier':0.03 } };
-const STREET_SETS = { asphalt:KIT2_SET, dirt:KIT2_SET };
 
 const NATURE_HEIGHT = {
   'tree_oak':1.23,'tree_default':1.71,'tree_detailed':1.33,'tree_fat':1.15,
@@ -2273,8 +2259,19 @@ function onTap(e){
 }
 
 /* ---------------- scene construction ---------------- */
+/* PERFORMANS DÜZELTMESİ: eskiden burada sadece R.scene.remove(R.stage) yapılıyordu.
+   Bu, önceki haritanın TÜM geometrilerini (zemin, binalar, dekor, birleştirilmiş
+   statik mesh'ler) GPU belleğinde bırakıyordu — her savaş girişinde birikip
+   kasmaya/bellek şişmesine yol açıyordu. Şimdi çıkmadan önce her mesh'in
+   geometrisi dispose ediliyor. Materyaller dispose EDİLMİYOR çünkü hepsi
+   mat()/MAT{} ve model önbelleği (MODEL_CACHE) üzerinden paylaşılıyor;
+   dispose edilen geometriler paylaşılan model kopyalarına ait olsa bile
+   sorun değil — Three.js bir sonraki render'da GPU'ya otomatik yeniden yükler. */
 function clearStage(){
-  if(R.stage) R.scene.remove(R.stage);
+  if(R.stage){
+    R.stage.traverse(o=>{ if(o.isMesh && o.geometry) o.geometry.dispose(); });
+    R.scene.remove(R.stage);
+  }
   R.stage=new THREE.Group(); R.scene.add(R.stage);
 }
 const MAT={};
@@ -2290,7 +2287,6 @@ function mat(color,rough,metal){
    (dünya boyutu ~0.5 x 1.0). Virajlarda tek bir eğik parça olmadığından, hücrede hem
    Z hem X yönünde birer kopya üst üste konup doğal bir "kavşak" hissi veriliyor —
    organik bir toprak/taş patika için bu, sert bir viraj yerine oldukça uygun duruyor. */
-function dirEq(a,b){ return a[0]===b[0] && a[1]===b[1]; }
 /* Savaş patikası. Path_Straight parçası 0.496 birim genişliğinde, kare ise 1.0 —
    tek parça kareyi doldurmadığı için yan yana İKİ parça konur (hafif bindirmeyle,
    böylece ne karo içinde ne de komşularla boşluk kalır).
@@ -3277,48 +3273,7 @@ function buildInvasionFront(gatePos, backDir){
      yerinde durmuyordu. Karadeliğin kendisi zaten yeterince güçlü bir görsel. */
 }
 
-/* ---- ÇEVRE SOKAKLARI ----
-   Savaş alanı dışına, ızgaraya hizalı sokak ağı döşer. Binalar sonradan bu hücrelere
-   denk gelmeyecek şekilde yerleştirilir, böylece sokaklar açık kalır. */
-/* verilen "hangi yönlerde komşu var" bilgisine göre doğru yol parçasını ve
-   dönüşünü bulan ortak çözücü — hem çevre sokakları hem savaş halkası kullanır */
-const STREET_DIR_IDX={'-X':0,'+X':1,'-Z':2,'+Z':3};
-function rotateStreetDir(d,q){
-  const order=['-X','-Z','+X','+Z'];   /* rotY +90°: -X -> -Z -> +X -> +Z */
-  return order[(order.indexOf(d)+q)%4];
-}
-function streetOpenOf(set,name){
-  if(name===set.straight) return set.straightDir==='X'?['-X','+X']:['-Z','+Z'];
-  if(name===set.bend) return set.bendDirs.slice();
-  if(name===set.tee) return ['-X','+X','-Z','+Z'].filter(d=>d!==set.teeMissing);
-  if(name===set.end) return [set.endDir||'+X'];
-  return ['-X','+X','-Z','+Z'];
-}
-function resolveStreetPiece(set, need){
-  const sameSet=(a,b)=>a.length===b.length && a.every(v=>b.indexOf(v)>=0);
-  if(need.length>=4) return {name:set.cross, rotQ:0};
-  /* tek komşulu hücre = çıkmaz uç. Düz parça kullanılırsa yol havada kesiliyormuş
-     gibi duruyordu; road_end kapaklı uç parçası bunu düzgün kapatıyor.
-     (Şehir simgesi halka yolu kestiğinde bu durum oluşuyor — Londra'da Big Ben
-     çevresindeki bozukluğun sebebi buydu.) */
-  if(need.length===1 && set.end){
-    const base=streetOpenOf(set,set.end);
-    for(let q=0;q<4;q++){
-      if(rotateStreetDir(base[0],q)===need[0]) return {name:set.end, rotQ:q};
-    }
-  }
-  const cand = need.length===3 ? [set.tee] : (need.length===2 ? [set.straight,set.bend] : [set.straight]);
-  for(const c of cand){
-    const base=streetOpenOf(set,c);
-    for(let q=0;q<4;q++){
-      const rotated=base.map(d=>rotateStreetDir(d,q));
-      if(need.length<=1 ? rotated.indexOf(need[0]||'-X')>=0 : sameSet(rotated,need)){
-        return {name:c, rotQ:q};
-      }
-    }
-  }
-  return {name:set.straight, rotQ:0};
-}
+
 
 /* NOT: buildOutskirtStreets() fonksiyonu buradan tamamen kaldırıldı — rastgele,
    bağlantısız sokak parçaları üretiyordu ve haritada anlamsız duruyordu.
@@ -4969,13 +4924,6 @@ function tracer(a,b,color){
   const line=new THREE.Line(geo,new THREE.LineBasicMaterial({color,transparent:true,opacity:0.95}));
   R.stage.add(line);
   B.shots.push({type:'fx',obj:line,ttl:0.09,max:0.09});
-}
-function swipeFx(pos){
-  const m=new THREE.Mesh(new THREE.RingGeometry(0.2,0.55,14,1,0,2.2),
-    new THREE.MeshBasicMaterial({color:PAL.allyWarm,transparent:true,opacity:0.8,side:THREE.DoubleSide,depthWrite:false}));
-  m.rotation.x=-Math.PI/2; m.position.set(pos.x,0.25,pos.z); m.rotation.z=rnd(0,6);
-  R.stage.add(m);
-  B.shots.push({type:'fx',obj:m,ttl:0.2,max:0.2});
 }
 function muzzleFlash(pos,color){
   const m=new THREE.Mesh(new THREE.SphereGeometry(0.11,8,8),
